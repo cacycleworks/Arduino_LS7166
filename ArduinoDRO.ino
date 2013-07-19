@@ -1,14 +1,14 @@
 /////////////////////////////////////////////////////////////////////////
 //  AdruinoDRO.ino
-const char date[13]="7-14-2013";
-const char version[6]="3.10";
+const char date[13]="7-18-2013";
+const char version[6]="3.11";
 //  Chris Kelley
 //  Interfaces Arduino with a glass scale from DROPros.com on the timing belt
 //  length measuring bench and outputs results to Adafruit 1.8" TFT live.
 /////////////////////////////////////////////////////////////////////////
 //  v2.0a - Start of code for use with glass scale from DROPros.com...
 //  v2.1 - implemented dual D flip-flops on quadrature output to simplify the
-//    ISRs for reading changes. Input still too fast for Arduino to keep up.
+//  	ISRs for reading changes. Input still too fast for Arduino to keep up.
 //  v3.0a - Start of  using LS7166 Quadrature counter IC to handle the accounting on the
 //      encoder's position.
 //  v3.10 - Steady initial release of timing belt measuring bench code.
@@ -21,10 +21,10 @@ const char version[6]="3.10";
 
 // DRO / measuring bench
 // Quadrature counter decoder LS7166 control lines
-byte ic_nRD = 14;	//A0;   // 14
-byte ic_CnD = 15;	//A1;   // 15
-byte ic_nWR = 16;	//A2;   // 16
-byte ic_nCS = 18;	//A4;   // 18
+byte ic_nRD = 14;	//A0
+byte ic_CnD = 15;	//A1
+byte ic_nWR = 16;	//A2
+byte ic_nCS = 18;	//A4
 //  Note that data lines are D0 through D7, accessed as data port D
 
 // Center-to-center minimum length MUST be remeasured if center block's bolts loosened or removed!
@@ -36,7 +36,7 @@ byte ic_nCS = 18;	//A4;   // 18
 // C2CMINMICRON is actually 221238, but initial setting has error
 //	error is about 8~10 microns for when there is no rubber pad and blocks can touch
 //  W/rubber pad, this initial set error is somewhat epic and instead of 221228, it's 221193
-#define C2CMINMICRON 221193
+#define C2CMINMICRON 221200
 #define LS7166INISET 0
 unsigned long EncoderCount = 0; // this is current encode position read from LS7166
 
@@ -84,26 +84,28 @@ byte checkJoystick(void);
 // TFT Globals
 // Hardware SPI
 Adafruit_ST7735 tft = Adafruit_ST7735(ADA_CS, ADA_DC, ADA_RST);
-// Software SPI
-// Adafruit_ST7735 tft = Adafruit_ST7735(ADA_CS, ADA_DC, ADA_MOSI, ADA_SCLK, ADA_RST);
-
-//A3 used by joystick!!    //17
 
 
 /////////////////////////////////////////////////////////////////////////
 //  Belt variables
+//     number of teeth    68            70              72        88        89       93       95
+const char *beltNames[]={"TB800, TBF1", "TB900, TB796", "TB1100", "TB1198", "TB999", "TBST4", "TB996 TB748R"};
+// ----------------------------------------------------------------------
 float beltDiameter = 55.7000;  // diameter of belt cords on sprocket, in mm measured by hand
 // ----------------------------------------------------------------------
-const int beltTeeth[]={68,    70,   72,   88,     89,   93,     95};
-const float beltMin[]={9.28,  9.67, 10.04,13.07,  13.1, 13.95,  14.350};
-const float beltMax[]={68,    70,   72,   88,     89,   14.01,  14.350};
-// ----------------------------------------------------------------------
-//                        68            70              72        88        89       93       95
-const char *beltNames[]={"TB800, TBF1", "TB900, TB796", "TB1100", "TB1198", "TB999", "TBST4", "TB996 TB748R"};
+//          beltIdx     0       1       2       3       4       5       6
+const int beltTeeth[]={68,		70,		72,   	88,     89,		93,		95};
+const float beltC2C[]={9.342,	9.719,	10.117,	13.111,	13.300, 14.024,	14.392};
+const float beltMax[]={9.374,	9.739,	10.133,	13.130,	13.300, 14.04,	14.436};
+const char *beltNotes[]={"", "TB900: 9.723 TB796:9.719", "Short is bad", "Short is bad", "", "", "TB748R: 14.398\""};
 /////////////////////////////////////////////////////////////////////////
-byte diaX = 0;
+//  program control variables
+byte diaX = 0;  // used if we make belt diameter user changeable
 byte diaY = 0;
+char tLc2c[15]="new";
+char tLc2cPrev[15]="old";
 
+/////////////////////////////////////////////////////////////////////////
 void setup() {
 	pinMode(ic_nRD, OUTPUT);
 	pinMode(ic_CnD, OUTPUT);
@@ -114,11 +116,6 @@ void setup() {
 	digitalWrite(ic_CnD, HIGH);
 	digitalWrite(ic_nWR, HIGH);
 	digitalWrite(ic_nCS, HIGH);
-
-	//  Data port manipulation
-	// from: http://www.arduino.cc/en/Reference/PortManipulation
-	// and also http://hekilledmywire.wordpress.com/2011/02/23/direct-port-manipulation-using-the-digital-ports-tutorial-part-3/
-	DDRD = 0; // sets Arduino Digital pins 0-7 all as inputs
 
 	// If your TFT's plastic wrap has a Red Tab, use the following:
 	tft.initR(INITR_REDTAB);   // initialize a ST7735R chip, red tab
@@ -152,20 +149,22 @@ void setup() {
 	init_7166();
 }
 /////////////////////////////////////////////////////////////////////////
+//   cdcs_7166(): every time you want to do something with the 7166, CD and CS
+//      have to be set or reset, so I made a function for it
 void cdcs_7166(boolean CnD, boolean nCS ) {
 	digitalWrite(ic_CnD,CnD);
 	digitalWrite(ic_nCS,nCS);
 	delayMicroseconds(50);
 }
 /////////////////////////////////////////////////////////////////////////
-//	ctrl_7166() formerly set cdcs(1,0), however let's move that to the caller
+//	ctrl_7166() would formerly set cdcs(1,0) in here, however let's move that to the caller
 void ctrl_7166( byte control ){ 
 	DDRD = 0xff; // sets Arduino Digital pins 0-7 all as outputs
 	PORTD = control;
     latchWR_7166();
 }
 /////////////////////////////////////////////////////////////////////////
-//  sends pulse after the command to tell the 7166 to latch in the data
+//  sends WR pulse after the command to tell the 7166 to latch in the data
 void latchWR_7166(){
 	delayMicroseconds(20);
 	digitalWrite(ic_nWR,0);
@@ -194,19 +193,21 @@ void write_7166(unsigned long Data ){
 #define OCCR 0x80
 #define QR 0xC0
 void init_7166() {
-	EncoderCount = 0;
+	EncoderCount = 0;   // this is encoder's position
+	//  Data port manipulation
+	// from: http://www.arduino.cc/en/Reference/PortManipulation
+	// and also http://hekilledmywire.wordpress.com/2011/02/23/direct-port-manipulation-using-the-digital-ports-tutorial-part-3/
     DDRD = 0xff; // sets Arduino Digital pins 0-7 all as outputs
 	digitalWrite(ic_nRD,1);
 	delayMicroseconds(20);
-	cdcs_7166(1,0); // C/D /CS have to be 1,0 to write to MCR, ICR, OCCR, QR & to read OSR
-	// from http://hades.mech.northwestern.edu/index.php/Using_the_LS7166_Quadrature_Counter
+	// see http://hades.mech.northwestern.edu/index.php/Using_the_LS7166_Quadrature_Counter for some hints
+	cdcs_7166(1,0); // C/D /CS have to be 1,0 to write to MCR, ICR, OCCR, QR & to read OSR. Only needs setting once, so moved out of ctrl_7166()
 	ctrl_7166(0x20);    //Performs master reset
 	ctrl_7166(0x04);   //Sub-reset
 	ctrl_7166(ICR|0x18);    //Enables A/B, sets up pin 3-4
 	ctrl_7166(OCCR|0x34); //Divide by n mode   0x04
 	ctrl_7166(QR|0x03);   //x4 quadrature mode   0x04
 
-	// Apparently, the PR is supposed to be the max expected value
 	ctrl_7166( 1 );	// tell MCR to load PR
 	cdcs_7166(0,0);	// somewhat rare usage of 0,0: read OL and write PR
 	write_7166( LS7166INISET );
@@ -215,7 +216,7 @@ void init_7166() {
 }
 
 //  latchRD_7166() -- unlike latching out, which is done after, reading
-//  gets the data in a signal sandwich
+//  gets the data inside a signal sandwich
 byte latchRD_7166(){
 	byte dataread=0;
 	// nRD should already be high
@@ -229,7 +230,6 @@ byte latchRD_7166(){
 	return dataread;
 }
 
-//  this function ASSumes you already handled CnD, nCS before hand!!!
 unsigned long read_7166( ){
 	unsigned long tmp=0, Data=0;
 	// Tell MCR we want to read the OL
@@ -307,7 +307,11 @@ void calibrate(){
 		tft.setTextSize(2);
 		tft.setCursor(0, 28);
 		tft.fillScreen(BLACK);
-		tft.print(F("DATA Port\nreset!\nOK to upload!\n"));
+		tft.print(F("DATA Port\nreset!\n"));
+		tft.setTextColor(WHITE);
+		tft.print(F("Unplug 12V"));
+		tft.setTextColor(GRAY);
+		tft.print(F(" &\nOK to upload!\n"));
 		tft.setTextSize(1);
 		tft.print(F("Or reset to start over :)"));
 		while( 1 )
@@ -325,34 +329,26 @@ void calibrate(){
 		init_7166();
 	}
 	tft.fillScreen(BLACK);
+	sprintf(tLc2cPrev,"");
 	update();
 }
-/////////////////////////////////////////////////////////////////////////
-char tLc2c[15]="new";
-char tLc2cPrev[15]="old";
 /////////////////////////////////////////////////////////////////////////
 void update( ) {
 	char text[64];   // general output display buffer
 	char fBuffer[15]; // used in repeated dtostrf() calls
-	float position, mmLength;
+	float position, mmLength, pitch;
 
 	// read from LS7166
 	EncoderCount=read_7166();
 	EncoderCount+=C2CMINMICRON;
 	//  if limit switches get installed onto the base, here's where code
-	//  would go to reset the encoder's position
-
+	//  would go to reset the encoder's position.
 
 	// do all calculations first...
-	// convert counts to mm. Would be /1000 but we're only checking ONE
-	//  quadrature phase, so we're only getting 1/4 of the data
-	// mmLength= (float) (long)EncoderCount/250; //
 
-	//  EncoderCount as a variable now starts AT the minimum length!
-	//  as the slide moves, the encoder counts DOWN from its max possible value
+	//  EncoderCount as a variable is C-2-C length in microns
 	mmLength= (float)EncoderCount/1000;  // divide microns to get mm
-
-	position = mmLength/25.4;
+	position = mmLength/25.4;   	//  position is c-2-c length in inches
 	dtostrf(position,-6,3,fBuffer); // output length to string, to 0.001
 	// strcmp returns 0 if strings are equal
 	if( !( strcmp((const char *)fBuffer, (const char *)tLc2c) )) {
@@ -367,13 +363,19 @@ void update( ) {
 	// convert it to belt length, in mm
 	mmLength=(mmLength*2)+(beltDiameter*3.14159);
 	dtostrf(mmLength,-5,2,tLength);
-	//  handle teeth, divide metric length by ideal pitch of 9.525mm (3/8")
+	//  handle teeth, divide metric length by longer than ideal pitch
+	//	rather than ideal pitch of 9.525mm (3/8")
 	//  and have result round to an integer
-	int8_t teeth=(int)(mmLength/9.525+.5);
-	// position is current belt length, in mm
+	byte teeth=(int)(mmLength/9.58+.5);
+	// mmLength is current belt length, in mm
 	// convert it to actual pitch with decimal point to display
-	mmLength=mmLength/(float)teeth;
-	dtostrf(mmLength,-4,3,tPitch);
+	pitch=mmLength/(float)teeth;
+	// check to see if we need to be on the next higher tooth?
+	if( pitch > 9.64 ){
+		teeth++;
+		pitch=mmLength/(float)teeth;
+	}
+	dtostrf(pitch,-4,3,tPitch);
 
 	//  format and output data to the screen
 	//  Use L1 as top of cursor for L2, and so on.
@@ -392,11 +394,14 @@ void update( ) {
 	tft.setCursor(0,4);
 	tft.setTextColor(ST7735_RED);
 	bool found=false;
+
 	// Show belt model -- or blank if not found
+	byte beltIdx = 14; // initialize to a number greater than belt types
 	for(int idx=0; idx<10; idx++ ) {
 		if( teeth == beltTeeth[idx] ){
 			blankPrint( beltNames[idx], 2, BLACK );
 			found=true;
+			beltIdx=idx;
 			tft.setTextColor(ORANGE); // ST7735_BLUE);
 		}
 	}
@@ -421,23 +426,71 @@ void update( ) {
 	blankPrint( tLength, 2, BLACK );
 	tft.setTextColor(ST7735_BLUE);
 	tft.setTextSize(1);
+	diaX = tft.getCursor(1);
+	diaY = tft.getCursor(0)+9;
 	tft.print( " mm length\n" );
+	tft.setCursor(diaX,diaY);
+	dtostrf(beltDiameter,-5,2,fBuffer);
+	// blankPrint( fBuffer, 1, BLACK );
+	sprintf( text, " %c %smm", 0xec, fBuffer );
+	tft.print( text );
+
+	float difference=0;
 	// line 5 (0,16+8+16+8) size 1 to (0,16+8+16+8+8)
 	tft.setCursor(0,L1+L2+L3+L4); // font size 2 = 2*5 x 2*8 = 10x16
-	diaX=tft.getCursor(1);
-	diaY=tft.getCursor(0);
-	tft.setTextColor(ST7735_BLUE);
-	dtostrf(beltDiameter,-5,2,fBuffer);
-	blankPrint( fBuffer, 1, BLACK );
-	sprintf( text, " mm adjust %c w/%c%c", 0xec, 0x18, 0x19 );
-	tft.print( text );
+	if( beltIdx < 14 ) {
+		tft.setTextColor(ST7735_BLUE);
+		tft.setTextSize(1);
+		dtostrf(beltC2C[beltIdx],-6,3,fBuffer);
+		sprintf( text, "Ideal c2c: %s inches", fBuffer );
+		tft.print( text );
+	} else {	// clear out the text when we're not presenting anything
+		blankPrint( "                           ", 1, BLACK );
+	}
+
 	// line 6
-	// tft.setCursor(0,L1+L2+L3+L4+L5);
-	//      blankPrint( "good/bad\n", 2, BLACK );
+	tft.setCursor(0,L1+L2+L3+L4+L5);
+	if( beltIdx < 14 ) {
+		bool good=0;
+		tft.setTextColor(BLUE);
+		tft.setTextSize(1);
+		tft.print( "diff = ");
+		difference = position - beltC2C[beltIdx];
+		dtostrf(difference,-4,3,fBuffer);
+		// provide color as feedback about the difference in c2c
+		if( difference < -.015 )
+			tft.setTextColor(RED);
+		else if( difference < -0.007 )
+			tft.setTextColor(YELLOW);
+		// the if-else-if structure has to be descending in values, so > .015 goes 1st
+		else if( difference > 0.015 )
+			tft.setTextColor(RED);
+		else if( difference > 0.010 )
+			tft.setTextColor(YELLOW);
+		else {    // diff is between -0.007 and +0.010
+			tft.setTextColor(WHITE);
+			good=1;
+		}
+		blankPrint( fBuffer, 1, BLACK );
+		if(good){
+			tft.setTextColor(GREEN);
+			blankPrint( " GOOD!", 1, BLACK );
+		} else {
+			if( position < beltMax[beltIdx] && difference > 0 ) {
+				tft.setTextColor(YELLOW);
+				blankPrint( " used? ", 1, BLACK );
+			}
+			else
+				blankPrint( " bad? ", 1, BLACK );
+		}
+	} else {
+		blankPrint( "                     ", 1, BLACK );
+	}
 	// line 7
 	// tft.setCursor(0,L1+L2+L3+L4+L5+L6);
 	// line 8  -- doesn't quite fit...
 	tft.setCursor(0,L1+L2+L3+L4+L5+L6+L7-3);
+	tft.setTextColor(BLUE);
 	tft.setTextSize(1);
 	tft.print( "Encoder position: " );
 	sprintf( text, "%lu    ", (unsigned long)EncoderCount );
